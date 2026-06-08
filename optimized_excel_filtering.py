@@ -237,7 +237,24 @@ def main():
         return
     total_files = len(file_paths)
     indexed_files = [(i, f, total_files) for i, f in enumerate(file_paths)]
-    num_processes = (os.cpu_count() - 4) or 4 
+
+    # ------------------------ CPU MULTIPROCESSING OPTIONS ------------------------#
+
+    # Use a "capped" approach:
+    # 1. Get total count (defaulting to 4 if None)
+    # 2. Try to subtract 4, but don't let it go below 1.
+    # 3. Ensure we never exceed the actual physical core count.
+    #total_cores = os.cpu_count() or 4
+    #num_processes = max(1, min(total_cores, total_cores - 4))
+
+    #The "Power User" Logic:
+    total_cores = os.cpu_count() or 4
+    # If we have lots of cores, reserve some; if we have few, use them all.
+    num_processes = total_cores - 4 if total_cores > 8 else total_cores
+    # Ensure we never try to run 0 or negative processes
+    num_processes = max(1, num_processes)
+
+
     
     # --- LOG FILE SETUP ---
     log_file_path = os.path.join(folder_input if folder_output == "" else folder_output, "error_log.txt")

@@ -119,10 +119,11 @@ def main():
             compiled_durations.append([res['base_id'], res['duration_val']])
 
     sample_path_split = os.path.normpath(file_paths[0]).split(os.path.sep)
-    dir_part_1 = sample_path_split[-3] if len(sample_path_split) >= 3 else "folder"
-    dir_part_2 = sample_path_split[-2] if len(sample_path_split) >= 2 else "output"
+    #dir_part_1 = sample_path_split[-3] if len(sample_path_split) >= 3 else "folder"
+    #dir_part_2 = sample_path_split[-2] if len(sample_path_split) >= 2 else "output"
     
-    output_filename = f'{experiment_name.upper()}_descriptive_statistics_{dir_part_1}_{dir_part_2}.xlsx'
+    #output_filename = f'{experiment_name.upper()}_descriptive_statistics_{dir_part_1}_{dir_part_2}.xlsx'
+    output_filename = f'{experiment_name.upper()}_descriptive_statistics.xlsx'
     output_path = os.path.join(folder_output, output_filename)
 
     with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
