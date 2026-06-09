@@ -32,6 +32,8 @@ RENAME_MAP = {
 }
 
 
+# Make sure these data IDS match the ones being worked on in the excel files. This is used for the coloring of the output excel file.
+
 data_ids = {
     "3879": ("TG", "Female"),
     "3880": ("TG", "Female"),

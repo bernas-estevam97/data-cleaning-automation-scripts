@@ -49,7 +49,8 @@ def find_table_data(workbook_path):
 
                     for r in range(row_index + 1, ws.max_row + 1):
                         label_cell = ws.cell(row=r, column=col_index)
-                        value_cell = ws.cell(row=r, column=col_index + 1)
+                        # FIX 1: Look 4 columns over to grab the 'Value(cm) at 38%' data
+                        value_cell = ws.cell(row=r, column=col_index + 4)
 
                         label = label_cell.value
                         value = value_cell.value
@@ -88,7 +89,8 @@ def run(input_file):
         table_id = entry.get("Table ID", "")
         w_tag = None
         if table_id.endswith("W"):
-            parts = table_id.split("_")
+            # FIX 2: Split by both underscore and hyphen to correctly isolate '4W'
+            parts = re.split(r'[_\-]', table_id)
             for part in parts:
                 if re.fullmatch(r"\d+W", part) or re.fullmatch(r"\d+\+\d+W", part):
                     w_tag = part
@@ -103,20 +105,6 @@ def run(input_file):
     output_file = os.path.join(os.path.dirname(input_file), f"MFrame_clean_output_{timestamp}.xlsx")
     wb = Workbook()
     wb.remove(wb.active)
-
-    # white_font = Font(color="FFFFFFFF")
-
-    # def get_fill(genotype, sex):
-    #     if (genotype, sex) == ("TG", "Male"):
-    #         return PatternFill(start_color="FF003366", end_color="FF003366", fill_type="solid"), True
-    #     elif (genotype, sex) == ("WT", "Male"):
-    #         return PatternFill(start_color="FFADD8E6", end_color="FFADD8E6", fill_type="solid"), False
-    #     elif (genotype, sex) == ("TG", "Female"):
-    #         return PatternFill(start_color="FF8B0000", end_color="FF8B0000", fill_type="solid"), True
-    #     elif (genotype, sex) == ("WT", "Female"):
-    #         return PatternFill(start_color="FFFFC0CB", end_color="FFFFC0CB", fill_type="solid"), False
-    #     else:
-    #         return None, False
 
     def sort_w_tags(w_tag):
         if w_tag == "Unknown":
@@ -137,7 +125,6 @@ def run(input_file):
         # ---------------------------------------------------------
         # NEW LOGIC: Handle duplicates and perform mean on columns
         # ---------------------------------------------------------
-        # This groups identical Table IDs together and averages all other numeric columns.
         df = df.groupby("Table ID", as_index=False).mean()
         
         ws = wb.create_sheet(title=w_tag)
@@ -162,6 +149,8 @@ def run(input_file):
 # CLI usability
 if __name__ == "__main__":
     input_file = input("Enter the path to the Excel file: ").strip()
+    # Strip quotes just in case the file path was dragged and dropped into the terminal
+    input_file = input_file.strip('"').strip("'")
     try:
         output_path = run(input_file)
         print(f"✅ Extracted data has been written to: {output_path}")
