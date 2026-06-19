@@ -21,7 +21,7 @@ def extract_data_from_excel(file_path):
     file_id_split = "_".join(parts[:parts.index("out")]) if "out" in parts else file_id
 
     # Removes a 1 or 2-digit number surrounded by underscores from the string
-    base_id = re.sub(r'_\d{1,2}(?=_)', '', file_id_split, count=1)
+    base_id = re.sub(r'_\d{1,2}(?=_|\.|$)', '', file_id_split, count=1)
 
     # 1. Extract the Header Row
     header_row_raw = df_filtered.iloc[0]

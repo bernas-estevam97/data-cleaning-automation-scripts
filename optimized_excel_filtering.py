@@ -1,6 +1,5 @@
 import os
 import time
-import sys
 import traceback
 import datetime
 import warnings
@@ -8,7 +7,7 @@ import pandas as pd
 import numpy as np
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-# --- GLOBALS (Moved outside worker to save initialization time) ---
+# --- GLOBALS ---
 CHOICE_MAP = {
     "0": '/Feature/Tail/Tip_X',
     "1": '/Feature/Tail/Center_X',
@@ -17,20 +16,20 @@ CHOICE_MAP = {
 }
 
 SUBTRACTION_MAP = {
-    ("0", "groundwalk", "old"): 0.522, #updated from ---> 0.524
+    ("0", "groundwalk", "old"): 0.522,
     ("1", "groundwalk", "old"): 0.525,
     ("0", "groundwalk", "new"): 0.502,
     ("1", "groundwalk", "new"): 0.519,
-    ("0", "beamwalk", "old"): 0.445, #updated from ---> 0.44
+    ("0", "beamwalk", "old"): 0.445,
     ("1", "beamwalk", "old"): 0.445,
     ("0", "beamwalk", "new"): 0.43,
     ("1", "beamwalk", "new"): 0.44,
-    ("0", "gridwalk", "old"): 0.496, #updated from ---> 0.507
-    ("0", "gridwalk", "new"): 0.483, #update from ---> 0.486
+    ("0", "gridwalk", "old"): 0.496,
+    ("0", "gridwalk", "new"): 0.483,
     ("1", "gridwalk", "old"): 0.504,
     ("1", "gridwalk", "new"): 0.498,
-    ("0", "swimming", "old"): 0.566, #value takes offset into account
-    ("0", "swimming", "new"): 0.568, #value takes offset into account
+    ("0", "swimming", "old"): 0.566,
+    ("0", "swimming", "new"): 0.568,
 }
 
 OFFSET_MAP = {
@@ -48,7 +47,7 @@ OFFSET_MAP = {
 }
 
 # --- WORKER FUNCTION ---
-def filter_excel_by_column(file_info_tuple, choice, animal_choice, experiment, old_or_new, output_folder):
+def filter_excel_by_column(file_info_tuple, choice, animal_choice, experiment, old_or_new, output_folder, height_cutoff):
     index, file_path, total_files = file_info_tuple
     file_name = os.path.basename(file_path)
     captured_warnings = []
@@ -58,20 +57,15 @@ def filter_excel_by_column(file_info_tuple, choice, animal_choice, experiment, o
          return (False, file_name, f"[ERROR] Invalid choice '{choice}'.", [], False)
 
     # --- 1. Determine Output Path and Check if it Exists ---
-    if output_folder == '':
-        output_file = os.path.splitext(file_path)[0] + '_filtered.xlsx'
-    else:
-        output_file = os.path.join(output_folder, os.path.splitext(file_name)[0] + '_filtered.xlsx')
+    output_file = os.path.join(output_folder, os.path.splitext(file_name)[0] + '_filtered.xlsx')
 
     if os.path.exists(output_file):
-        # Return early without reading data to save time. Added a 5th tuple item 'True' for 'is_skipped'
         return (True, file_name, f"Skipped file {index + 1} of {total_files}: {file_name} (Already exists)", [], True)
 
     try:
         with warnings.catch_warnings(record=True) as w_log:
             warnings.simplefilter("always") 
             
-            # OPTIMIZATION: Use calamine for vastly faster reads
             with pd.ExcelFile(file_path, engine='calamine') as xls:
                 df_raw = pd.read_excel(xls, sheet_name='Positions (used)')
                 df_kin = pd.read_excel(xls, sheet_name='Kinematics')
@@ -103,28 +97,16 @@ def filter_excel_by_column(file_info_tuple, choice, animal_choice, experiment, o
             df_kin_filtered = df_kin_clean.iloc[start_index : last_index + 1].copy()
 
             # 4. Apply Subtraction & Inversion
-            if experiment == "gridwalk":
-                target_indices = [5, 6, 9, 11, 13, 21, 23]
-            else:
-                target_indices = [5, 6, 9, 11, 13, 17]
+            target_indices = [5, 6, 9, 11, 13, 21, 23] if experiment == "gridwalk" else [5, 6, 9, 11, 13, 17]
 
-            #target_indices = [5, 6, 9, 11, 13, 17]
-
-            # --- NEW DYNAMIC INDEX LOGIC ---
-            # Check Nose Height (index 15) and Tail Tip Height (index 16) GRIDWALK HAS DIFFERENT INDEXES FOR NOSE HEIGHT AND TAIL HEIGHT
+            # --- DYNAMIC INDEX LOGIC ---
             if experiment == "gridwalk":
-                if df_kin_filtered.iloc[:, 15].mean() > 0.3:
-                    target_indices.append(15)
-                if df_kin_filtered.iloc[:, 19].mean() > 0.3:
-                    target_indices.append(19)
-                if df_kin_filtered.iloc[:, 20].mean() > 0.3:
-                    target_indices.append(20)
+                if df_kin_filtered.iloc[:, 15].mean() > 0.3: target_indices.append(15)
+                if df_kin_filtered.iloc[:, 19].mean() > 0.3: target_indices.append(19)
+                if df_kin_filtered.iloc[:, 20].mean() > 0.3: target_indices.append(20)
             else:
-                if df_kin_filtered.iloc[:, 15].mean() > 0.3:
-                    target_indices.append(15)
-                if df_kin_filtered.iloc[:, 16].mean() > 0.3:
-                    target_indices.append(16)
-            # -------------------------------
+                if df_kin_filtered.iloc[:, 15].mean() > 0.3: target_indices.append(15)
+                if df_kin_filtered.iloc[:, 16].mean() > 0.3: target_indices.append(16)
             
             target_indices_offset = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
             current_combo = (animal_choice, experiment, old_or_new)
@@ -138,28 +120,23 @@ def filter_excel_by_column(file_info_tuple, choice, animal_choice, experiment, o
             if value_to_subtract is not None:
                 df_kin_filtered.iloc[:, target_indices] = value_to_subtract - df_kin_filtered.iloc[:, target_indices]
 
-            # OPTIMIZATION: Numpy masking is faster than .replace()
+            # OPTIMIZATION: 2D Block replace 0 with np.nan instantly (No loop required)
             cols_to_replace_zero = df_kin_filtered.columns[26:50]
-            # Replace 0 with np.nan (faster math, still exports as empty cell in Excel)
-            for col in cols_to_replace_zero:
-                df_kin_filtered[col] = np.where(df_kin_filtered[col] == 0, np.nan, df_kin_filtered[col])
+            block_data = df_kin_filtered[cols_to_replace_zero]
+            df_kin_filtered.loc[:, cols_to_replace_zero] = np.where(block_data == 0, np.nan, block_data)
 
-            # 5. Hind Paw Timestamp Logic
-            setup_info = CHOICE_MAP.get(old_or_new)
-            hind_paw_col = '/Feature/Paw/Tao/Hind/Left_X'
-            if setup_info == "new":
-                if hind_paw_col in df_raw.columns and 'Time' in df_raw.columns:
-                    hind_reach = df_raw[df_raw[hind_paw_col] >= 0]
+            # 5. Hind Paw Timestamp Logic (Consolidated DRY logic)
+            if height_cutoff == "yes":
+                setup_info = CHOICE_MAP.get(old_or_new)
+                hind_paw_col = '/Feature/Paw/Tao/Hind/Left_X' 
+                
+                # Using df_raw_clean avoids index mismatch with df_kin_filtered
+                if hind_paw_col in df_raw_clean.columns and 'Time' in df_raw_clean.columns:
+                    threshold_val = 0 if setup_info == "new" else -0.016
+                    hind_reach = df_raw_clean[df_raw_clean[hind_paw_col] >= threshold_val]
+                    
                     if not hind_reach.empty:
-                        hind_timestamp = df_raw.loc[hind_reach.index[0], "Time"]
-                        cols_F_to_S = df_kin_filtered.columns[5:19]
-                        mask_time = df_kin_filtered['Time'] > hind_timestamp
-                        df_kin_filtered.loc[mask_time, cols_F_to_S] = np.nan
-            else:
-                if hind_paw_col in df_raw.columns and 'Time' in df_raw.columns:
-                    hind_reach = df_raw[df_raw[hind_paw_col] >= -0.016]
-                    if not hind_reach.empty:
-                        hind_timestamp = df_raw.loc[hind_reach.index[0], "Time"]
+                        hind_timestamp = df_raw_clean.loc[hind_reach.index[0], "Time"]
                         cols_F_to_S = df_kin_filtered.columns[5:19]
                         mask_time = df_kin_filtered['Time'] > hind_timestamp
                         df_kin_filtered.loc[mask_time, cols_F_to_S] = np.nan
@@ -175,13 +152,10 @@ def filter_excel_by_column(file_info_tuple, choice, animal_choice, experiment, o
             stats_output.columns = [df_kin_filtered.columns[0]] + list(numeric_cols)
 
             row_data = [np.nan] * len(df_kin_filtered.columns)
-            # Insert our string and numeric values
             row_data[0] = 'Time Duration'
             row_data[1] = time_duration
-            # Convert directly to DataFrame
             duration_df = pd.DataFrame([row_data], columns=df_kin_filtered.columns)
 
-            # OPTIMIZATION: Use xlsxwriter for much faster creation of new files
             with pd.ExcelWriter(output_file, engine='xlsxwriter') as writer:
                 df_raw.to_excel(writer, sheet_name='Positions (used)', index=False)
                 df_kin_filtered.to_excel(writer, sheet_name='Kinematics', index=False)
@@ -192,26 +166,27 @@ def filter_excel_by_column(file_info_tuple, choice, animal_choice, experiment, o
             for w in w_log:
                 captured_warnings.append(f"{w.category.__name__}: {str(w.message)}")
 
-        # Return Success (is_skipped = False)
         return (True, file_name, f"Processed file {index + 1} of {total_files}: {file_name}", captured_warnings, False)
 
     except Exception as e:
         error_msg = f"{e}\n{traceback.format_exc()}"
-        # Return Failure (is_skipped = False)
         return (False, file_name, error_msg, [], False)
 
 
 # --- MAIN EXECUTION ---
 def main():
+    # Streamlined Folder Validation
     while True:
         folder_input = input('\nWhich folder has your .xlsx files? ').strip()
         folder_output = input('\nWhich folder you wish to place your filtered files (if empty it will be the same as the input folder)? ').strip()
-        if os.path.isdir(folder_input) and folder_output=='':
-            print(f'\nInput folder: {os.path.basename(os.path.normpath(folder_input))}          Output folder: {os.path.basename(os.path.normpath(folder_input))}')
-            break
-        elif os.path.isdir(folder_input) and os.path.isdir(folder_output):
+        
+        if not folder_output:
+            folder_output = folder_input
+            
+        if os.path.isdir(folder_input) and os.path.isdir(folder_output):
             print(f'\nInput folder: {os.path.basename(os.path.normpath(folder_input))}          Output folder: {os.path.basename(os.path.normpath(folder_output))}')
             break
+            
         print("\n[!] Invalid folder path. Check your input and output folder paths and please try again.")
         
 
@@ -227,56 +202,39 @@ def main():
     animal_choice = get_valid_input("Animal species (0: Mus, 1: Acomys): ", ["0", "1"], "Choose 0 or 1.")
     experiment = get_valid_input("Experiment type: ", ["groundwalk", "gridwalk", "beamwalk", "swimming"], "Invalid experiment.")
     old_or_new = get_valid_input("Old or New settings? ", ["old", "new"], "Choose 'old' or 'new'.")
+    height_cutoff = get_valid_input("Apply hind paw height cutoff? (yes/no): ", ["yes", "no"], "Choose 'yes' or 'no'.")
 
-    # Added check to ignore files that end in _filtered.xlsx
     file_paths = [os.path.join(folder_input, f) for f in os.listdir(folder_input) 
                   if f.lower().endswith('.xlsx') and not f.startswith('~$') and not f.endswith('_filtered.xlsx')]
     
     if not file_paths:
         print("[!] No valid Excel files found to process.")
         return
+        
     total_files = len(file_paths)
     indexed_files = [(i, f, total_files) for i, f in enumerate(file_paths)]
 
-    # ------------------------ CPU MULTIPROCESSING OPTIONS ------------------------#
-
-    # Use a "capped" approach:
-    # 1. Get total count (defaulting to 4 if None)
-    # 2. Try to subtract 4, but don't let it go below 1.
-    # 3. Ensure we never exceed the actual physical core count.
-    #total_cores = os.cpu_count() or 4
-    #num_processes = max(1, min(total_cores, total_cores - 4))
-
-    #The "Power User" Logic:
+    # Dynamic CPU Allocation
     total_cores = os.cpu_count() or 4
-    # If we have lots of cores, reserve some; if we have few, use them all.
     num_processes = total_cores - 4 if total_cores > 8 else total_cores
-    # Ensure we never try to run 0 or negative processes
     num_processes = max(1, num_processes)
-
-
     
     # --- LOG FILE SETUP ---
-    log_file_path = os.path.join(folder_input if folder_output == "" else folder_output, "error_log.txt")
-    print(f"\n[INFO] Checking {total_files} files... Logging to: {log_file_path}")
+    log_file_path = os.path.join(folder_output, "error_log.txt")
+    print(f"\n[INFO] Checking {total_files} files using {num_processes} processes... Logging to: {log_file_path}")
     
     start_time = time.perf_counter()
-    
-    failed_files = []
-    files_with_warnings = []
-    skipped_files = []
+    failed_files, files_with_warnings, skipped_files = [], [], []
 
-    # Open log file with UTF-8
     with open(log_file_path, 'w', encoding='utf-8') as log_file:
         log_file.write(f"--- Processing Started at {datetime.datetime.now()} ---\n")
         log_file.write(f"Parameters: Choice={choice}, Animal={animal_choice}, Exp={experiment}, Set={old_or_new}\n")
         log_file.write("-" * 50 + "\n")
 
         with ProcessPoolExecutor(max_workers=num_processes) as executor:
-            futures = [executor.submit(filter_excel_by_column, item, choice, animal_choice, experiment, old_or_new, folder_output) for item in indexed_files]
+            futures = [executor.submit(filter_excel_by_column, item, choice, animal_choice, experiment, old_or_new, folder_output, height_cutoff) for item in indexed_files]
             
             for future in as_completed(futures):
-                # Unpack the 5 items now
                 success, fname, message, warnings_list, is_skipped = future.result()
                 
                 if success:
@@ -291,15 +249,11 @@ def main():
                             log_file.write(f"    - {w}\n")
                         files_with_warnings.append(fname)
                     else:
-                        # Clean success
                         print(message)
                         log_file.write(f"[SUCCESS] {fname}\n")
                 else:
-                    # Error
                     error_short = message.split('\n')[0]
-                    console_msg = f"[ERROR] File '{fname}': {error_short}"
-                    print(console_msg)
-                    
+                    print(f"[ERROR] File '{fname}': {error_short}")
                     log_file.write(f"\n[ERROR] File: {fname}\n{message}\n{'-'*30}\n")
                     failed_files.append((fname, error_short))
 
@@ -307,33 +261,23 @@ def main():
         duration = round(time.perf_counter() - start_time, 2)
         end_msg = f"\n[DONE] Finished in {duration} seconds.\n"
         
-        summary_msg = ""
-        
-        processed_count = total_files - len(skipped_files) - len(failed_files)
-        summary_msg += f"\nTotal Files Checked: {total_files}\n"
-        summary_msg += f"Processed Successfully: {processed_count}\n"
+        summary_msg = f"\nTotal Files Checked: {total_files}\n"
+        summary_msg += f"Processed Successfully: {total_files - len(skipped_files) - len(failed_files)}\n"
         summary_msg += f"Skipped (Already Existed): {len(skipped_files)}\n"
 
         if failed_files:
-            summary_msg += f"\n[FAIL] {len(failed_files)} files FAILED:\n"
-            for f, err in failed_files:
-                summary_msg += f"   - {f}: {err}\n"
+            summary_msg += f"\n[FAIL] {len(failed_files)} files FAILED:\n" + "".join([f"   - {f}: {err}\n" for f, err in failed_files])
         
         if files_with_warnings:
-             summary_msg += f"\n[WARN] {len(files_with_warnings)} files had WARNINGS (check log):\n"
-             for f in files_with_warnings:
-                 summary_msg += f"   - {f}\n"
+             summary_msg += f"\n[WARN] {len(files_with_warnings)} files had WARNINGS (check log):\n" + "".join([f"   - {f}\n" for f in files_with_warnings])
 
         if not failed_files and not files_with_warnings:
             summary_msg += "\n[OK] Processing completed without errors or warnings.\n"
         
         summary_msg += f"\nFull details saved to: '{os.path.basename(log_file_path)}'\n"
 
-        print(end_msg)
-        print(summary_msg)
-        
-        log_file.write(end_msg)
-        log_file.write(summary_msg)
+        print(end_msg + summary_msg)
+        log_file.write(end_msg + summary_msg)
 
 if __name__ == '__main__':
     try:
