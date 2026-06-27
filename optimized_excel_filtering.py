@@ -146,8 +146,25 @@ def filter_excel_by_column(file_info_tuple, choice, animal_choice, experiment, o
             time_duration = (time_series.iloc[-1] - time_series.iloc[0]) if not time_series.empty else 0
             numeric_cols = df_kin_filtered.columns[1:] 
             
-            stats_block = df_kin_filtered[numeric_cols].agg(['mean', 'std', 'median', 'min', 'max'])
-            stats_block.index = stats_block.index.str.title()
+            # --- CUSTOM STATISTIC: max_norm_mean ---
+            def max_norm_mean(col):
+                max_val = col.max()
+                # Protect against DivisionByZero and NaNs
+                if pd.isna(max_val) or max_val == 0:
+                    return np.nan
+                return (col / max_val).mean()
+            
+            stats_block = df_kin_filtered[numeric_cols].agg(['mean', 'std', 'median', 'min', 'max', max_norm_mean])
+            
+            # Formatting the index, preserving the exact wording for max_norm_mean
+            formatted_index = []
+            for idx in stats_block.index:
+                if idx == 'max_norm_mean':
+                    formatted_index.append('Max_Normalized_Mean')
+                else:
+                    formatted_index.append(str(idx).title())
+            stats_block.index = formatted_index
+            
             stats_output = stats_block.reset_index()
             stats_output.columns = [df_kin_filtered.columns[0]] + list(numeric_cols)
 

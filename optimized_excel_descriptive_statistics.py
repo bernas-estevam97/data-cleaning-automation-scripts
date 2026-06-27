@@ -27,19 +27,25 @@ def extract_data_from_excel(file_path):
     header_row_raw = df_filtered.iloc[0]
     header_stats = ["Ids"] + header_row_raw.iloc[1:].tolist()
 
-    # OPTIMIZATION: Convert the label column to lowercase strings ONCE and reuse it.
-    first_col = df_filtered.iloc[:, 0].astype(str).str.lower()
+    # OPTIMIZATION: Convert the label column to lowercase strings and strip spaces ONCE.
+    first_col = df_filtered.iloc[:, 0].astype(str).str.lower().str.strip()
 
     # 2. Extract Statistics
+    # Fixed the dictionary key to match exactly what the generator script outputs
     stats_to_extract = {
-        "mean": "Mean", "std": "Std", "median": "Median", 
-        "min": "Min", "max": "Max"
+        "mean": "Mean", 
+        "std": "Std", 
+        "median": "Median", 
+        "min": "Min", 
+        "max": "Max",
+        "max_normalized_mean": "Max_Normalized_Mean"
     }
     extracted_stats = {}
     
     for search_term, sheet_name in stats_to_extract.items():
-        # Using the pre-calculated first_col saves significant CPU cycles
-        mask = first_col.str.contains(search_term, na=False)
+        # FIX: Using EXACT match (==) instead of .str.contains()
+        # This prevents the search for "max" from accidentally grabbing "max_normalized_mean"
+        mask = first_col == search_term
         found_rows = df_filtered[mask]
 
         if not found_rows.empty:
@@ -50,6 +56,7 @@ def extract_data_from_excel(file_path):
 
     # 3. Extract Time Duration
     duration_val = None
+    # .str.contains() is kept here because the row is typically named "time duration"
     mask_duration = first_col.str.contains("duration", na=False)
     found_duration_rows = df_filtered[mask_duration]
     
@@ -94,8 +101,6 @@ def main():
     print(f"\nFound {total_files} files. Starting parallel data extraction...")
 
     # --- PHASE 1: READ MULTIPLE FILES IN PARALLEL ---
-    # Reserving 1 or 2 cores is usually enough. This ensures at least 1 core runs the task, 
-    # but prevents standard 4-core laptops from dropping to a single-threaded bottleneck.
     num_cores = max(1, cpu_count() - 2) 
     
     with Pool(processes=num_cores) as pool:
@@ -104,7 +109,7 @@ def main():
     print("Data extraction complete! Grouping trials and calculating means...\n")
 
     # --- PHASE 2: WRITE SEQUENTIALLY TO ONE EXCEL FILE ---
-    compiled_stats = {sheet: [] for sheet in ["Mean", "Std", "Median", "Min", "Max"]}
+    compiled_stats = {sheet: [] for sheet in ["Mean", "Std", "Median", "Min", "Max", "Max_Normalized_Mean"]}
     compiled_durations = []
     master_header = None
 
