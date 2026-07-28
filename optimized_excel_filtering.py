@@ -153,14 +153,25 @@ def filter_excel_by_column(file_info_tuple, choice, animal_choice, experiment, o
                 if pd.isna(max_val) or max_val == 0:
                     return np.nan
                 return (col / max_val).mean()
+
+            # --- CUSTOM STATISTIC: coef_var ---
+            def coef_var(col):
+                mean_val = col.mean()
+                # Protect against DivisionByZero and NaNs
+                if pd.isna(mean_val) or mean_val == 0:
+                    return np.nan
+                return col.std() / mean_val
             
-            stats_block = df_kin_filtered[numeric_cols].agg(['mean', 'std', 'median', 'min', 'max', max_norm_mean])
+            # Add coef_var to the aggregation list
+            stats_block = df_kin_filtered[numeric_cols].agg(['mean', 'std', 'median', 'min', 'max', max_norm_mean, coef_var])
             
-            # Formatting the index, preserving the exact wording for max_norm_mean
+            # Formatting the index, preserving the exact wording for custom stats
             formatted_index = []
             for idx in stats_block.index:
                 if idx == 'max_norm_mean':
                     formatted_index.append('Max_Normalized_Mean')
+                elif idx == 'coef_var':
+                    formatted_index.append('CV')
                 else:
                     formatted_index.append(str(idx).title())
             stats_block.index = formatted_index
