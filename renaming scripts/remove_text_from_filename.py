@@ -36,19 +36,28 @@ def remove_text_from_filename():
     except FileNotFoundError:
         sys.stderr.write("\n--------------------------\nFolder not found check your full path again\nRestarting function...\n")
         remove_text_from_filename()
+        return # Added return to prevent the script from falling through after a bad path
 
-    
     def confirmation_function():
         text_to_remove = input("What text you want to remove from your files' names? Pass it here -> ")
         confirmation = input(text_to_remove + " is the correct text you want to remove? ")
         files = os.listdir(dir_path)
+        
         if confirmation.lower() == "yes" or confirmation.lower() == "y":
             for idx, file in enumerate(files):
-                if text_to_remove in os.path.splitext(file)[0]: # Check if text string is in filename. If not this wont work
-                    os.rename(os.path.join(dir_path, file), os.path.join(dir_path, os.path.splitext(file)[0].removesuffix(text_to_remove) + os.path.splitext(file)[1]))
+                name, ext = os.path.splitext(file)
+                
+                # Check if text string is in filename. If not this wont work
+                if text_to_remove in name: 
+                    # Use .replace() instead of .removesuffix() to target any position
+                    new_name = name.replace(text_to_remove, "")
+                    
+                    old_file_path = os.path.join(dir_path, file)
+                    new_file_path = os.path.join(dir_path, new_name + ext)
+                    
+                    os.rename(old_file_path, new_file_path)
                 else:
                     pass
-                    #sys.exit('------------------------------------------------\nAt least one filename did not have the text given!\nMessage: Function shutdown\nExited')
             
             print("All files renamed successfully!")
             sys.exit(1)    
@@ -58,14 +67,10 @@ def remove_text_from_filename():
 
     return confirmation_function()
 
-try:
-    remove_text_from_filename()
-except KeyboardInterrupt: 
-    sys.stderr.write("\n--------------------------\nProgram terminated by user\n")
-    exit(2)
-
-
-
 
 if __name__ == '__main__':
-    remove_text_from_filename()
+    try:
+        remove_text_from_filename()
+    except KeyboardInterrupt: 
+        sys.stderr.write("\n--------------------------\nProgram terminated by user\n")
+        sys.exit(2)
