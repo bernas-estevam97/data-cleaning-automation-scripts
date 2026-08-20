@@ -93,77 +93,93 @@ def filter_excel_by_column(file_info_tuple, choice, animal_choice, experiment, o
             else:
                 last_index = len(df_raw_clean) - 1
 
-            # 3. Filter Kinematics
+            # 3. Filter Kinematics & Cast Numeric Columns to Float
             df_kin_filtered = df_kin_clean.iloc[start_index : last_index + 1].copy()
+
+            # FIX: Convert all data columns (except Time) to float64 upfront
+            # Prevents FutureWarning for dtype incompatibility & prevents xlsxwriter json serialization crash
+            numeric_cols = [col for col in df_kin_filtered.columns if col != 'Time']
+            for col in numeric_cols:
+                df_kin_filtered[col] = pd.to_numeric(df_kin_filtered[col], errors='coerce').astype(float)
 
             # 4. Apply Subtraction & Inversion
             target_indices = [5, 6, 9, 11, 13, 21, 23] if experiment == "gridwalk" else [5, 6, 9, 11, 13, 17]
 
-            # --- DYNAMIC INDEX LOGIC ---
+            # --- DYNAMIC INDEX LOGIC (Safe mean check to avoid RuntimeWarning) ---
+            def safe_mean_gt(df, col_idx, thresh=0.3):
+                if col_idx < df.shape[1]:
+                    s = df.iloc[:, col_idx].dropna()
+                    return not s.empty and s.mean() > thresh
+                return False
+
             if experiment == "gridwalk":
-                if df_kin_filtered.iloc[:, 15].mean() > 0.3: target_indices.append(15)
-                if df_kin_filtered.iloc[:, 19].mean() > 0.3: target_indices.append(19)
-                if df_kin_filtered.iloc[:, 20].mean() > 0.3: target_indices.append(20)
+                if safe_mean_gt(df_kin_filtered, 15): target_indices.append(15)
+                if safe_mean_gt(df_kin_filtered, 19): target_indices.append(19)
+                if safe_mean_gt(df_kin_filtered, 20): target_indices.append(20)
             else:
-                if df_kin_filtered.iloc[:, 15].mean() > 0.3: target_indices.append(15)
-                if df_kin_filtered.iloc[:, 16].mean() > 0.3: target_indices.append(16)
+                if safe_mean_gt(df_kin_filtered, 15): target_indices.append(15)
+                if safe_mean_gt(df_kin_filtered, 16): target_indices.append(16)
             
-            target_indices_offset = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
+            target_indices_offset = [i for i in [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18] if i < df_kin_filtered.shape[1]]
+            target_indices = [i for i in target_indices if i < df_kin_filtered.shape[1]]
             current_combo = (animal_choice, experiment, old_or_new)
             
             value_to_subtract = SUBTRACTION_MAP.get(current_combo)
             value_to_add_offset = OFFSET_MAP.get(current_combo)
 
-            if value_to_add_offset is not None:
+            if value_to_add_offset is not None and target_indices_offset:
                 df_kin_filtered.iloc[:, target_indices_offset] += value_to_add_offset
 
-            if value_to_subtract is not None:
+            if value_to_subtract is not None and target_indices:
                 df_kin_filtered.iloc[:, target_indices] = value_to_subtract - df_kin_filtered.iloc[:, target_indices]
 
-            # OPTIMIZATION: 2D Block replace 0 with np.nan instantly (No loop required)
-            cols_to_replace_zero = df_kin_filtered.columns[26:50]
-            block_data = df_kin_filtered[cols_to_replace_zero]
-            df_kin_filtered.loc[:, cols_to_replace_zero] = np.where(block_data == 0, np.nan, block_data)
+            # FIX: Replace 0 with np.nan safely on available numeric columns 26:50
+            max_col = min(50, df_kin_filtered.shape[1])
+            if max_col > 26:
+                cols_to_replace_zero = df_kin_filtered.columns[26:max_col]
+                df_kin_filtered[cols_to_replace_zero] = df_kin_filtered[cols_to_replace_zero].replace(0, np.nan)
 
-            # 5. Hind Paw Timestamp Logic (Consolidated DRY logic)
+            # 5. Hind Paw Timestamp Logic (FIX: checked old_or_new directly)
             if height_cutoff == "yes":
-                setup_info = CHOICE_MAP.get(old_or_new)
                 hind_paw_col = '/Feature/Paw/Tao/Hind/Left_X' 
                 
-                # Using df_raw_clean avoids index mismatch with df_kin_filtered
                 if hind_paw_col in df_raw_clean.columns and 'Time' in df_raw_clean.columns:
-                    threshold_val = 0 if setup_info == "new" else -0.016
+                    threshold_val = 0 if old_or_new == "new" else -0.016
                     hind_reach = df_raw_clean[df_raw_clean[hind_paw_col] >= threshold_val]
                     
                     if not hind_reach.empty:
                         hind_timestamp = df_raw_clean.loc[hind_reach.index[0], "Time"]
-                        cols_F_to_S = df_kin_filtered.columns[5:19]
+                        cols_F_to_S = df_kin_filtered.columns[5:min(19, df_kin_filtered.shape[1])]
                         mask_time = df_kin_filtered['Time'] > hind_timestamp
                         df_kin_filtered.loc[mask_time, cols_F_to_S] = np.nan
 
             # 6. Statistics and Saving
-            time_series = df_kin_filtered['Time'].dropna()
+            time_series = df_kin_filtered['Time'].dropna() if 'Time' in df_kin_filtered.columns else pd.Series(dtype=float)
             time_duration = (time_series.iloc[-1] - time_series.iloc[0]) if not time_series.empty else 0
-            numeric_cols = df_kin_filtered.columns[1:] 
+            stats_cols = [col for col in df_kin_filtered.columns if col != 'Time']
             
-            # --- CUSTOM STATISTIC: max_norm_mean ---
+            # --- CUSTOM STATISTIC: max_norm_mean (Safe against empty slices) ---
             def max_norm_mean(col):
-                max_val = col.max()
-                # Protect against DivisionByZero and NaNs
+                clean_col = col.dropna()
+                if clean_col.empty:
+                    return np.nan
+                max_val = clean_col.max()
                 if pd.isna(max_val) or max_val == 0:
                     return np.nan
-                return (col / max_val).mean()
+                return (clean_col / max_val).mean()
 
-            # --- CUSTOM STATISTIC: coef_var ---
+            # --- CUSTOM STATISTIC: coef_var (Safe against empty slices) ---
             def coef_var(col):
-                mean_val = col.mean()
-                # Protect against DivisionByZero and NaNs
+                clean_col = col.dropna()
+                if clean_col.empty:
+                    return np.nan
+                mean_val = clean_col.mean()
                 if pd.isna(mean_val) or mean_val == 0:
                     return np.nan
-                return col.std() / mean_val
+                return clean_col.std() / mean_val
             
             # Add coef_var to the aggregation list
-            stats_block = df_kin_filtered[numeric_cols].agg(['mean', 'std', 'median', 'min', 'max', max_norm_mean, coef_var])
+            stats_block = df_kin_filtered[stats_cols].agg(['mean', 'std', 'median', 'min', 'max', max_norm_mean, coef_var])
             
             # Formatting the index, preserving the exact wording for custom stats
             formatted_index = []
@@ -177,11 +193,12 @@ def filter_excel_by_column(file_info_tuple, choice, animal_choice, experiment, o
             stats_block.index = formatted_index
             
             stats_output = stats_block.reset_index()
-            stats_output.columns = [df_kin_filtered.columns[0]] + list(numeric_cols)
+            stats_output.columns = [df_kin_filtered.columns[0]] + list(stats_cols)
 
             row_data = [np.nan] * len(df_kin_filtered.columns)
             row_data[0] = 'Time Duration'
-            row_data[1] = time_duration
+            if len(row_data) > 1:
+                row_data[1] = time_duration
             duration_df = pd.DataFrame([row_data], columns=df_kin_filtered.columns)
 
             with pd.ExcelWriter(output_file, engine='xlsxwriter') as writer:
