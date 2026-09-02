@@ -7,6 +7,35 @@ from pathlib import Path
 import datetime
 import pyautogui
 import logging
+import pyperclip
+
+def set_file_dialog_path(folder_path=None, file_name=None, confirm_twice=False):
+    """
+    Navigates and sets filenames in Windows 10/11 Open/Save file dialogs reliably.
+    - Uses Ctrl+L for address bar (prevents Windows 11 Alt+D keytip/arrow highlighting issues)
+    - Uses Alt+N to jump directly to the File Name text box (bypasses tab-stop counting)
+    - Uses pyperclip clipboard pasting (prevents dropped characters or backslash issues)
+    """
+    if folder_path:
+        pyautogui.hotkey('ctrl', 'l')
+        time.sleep(0.5)
+        pyperclip.copy(folder_path)
+        pyautogui.hotkey('ctrl', 'v')
+        time.sleep(0.5)
+        pyautogui.press('enter')
+        time.sleep(0.8)
+    
+    if file_name:
+        pyautogui.hotkey('alt', 'n')
+        time.sleep(0.5)
+        pyperclip.copy(file_name)
+        pyautogui.hotkey('ctrl', 'v')
+        time.sleep(0.5)
+        pyautogui.press('enter')
+        if confirm_twice:
+            time.sleep(0.5)
+            pyautogui.press('enter')
+
 
 # Set up logging configuration
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -18,18 +47,16 @@ def automation_function_ai_preparation():
         print('Folder selected: ', folder_input)
         print("""
 Choices Information\n
-0 - Before 22-10-2025 video files not flipped videos.\n
-1 - After and including 22-10-2025 dated video files not flipped.\n
-2 - Before 22-10-2025 video files and flipped.\n 
-3 - After and including 22-10-2025 dated video files and flipped.\n
+0 - Before 22-10-2025 video files.\n
+1 - After and including 22-10-2025 dated video files.\n
 """) 
         while True:
             try:
-                choice_script = int(input('Which script you want to run (0-3)? '))
-                if 0 <= choice_script <= 3:
+                choice_script = int(input('Which script you want to run (0 or 1)? '))
+                if 0 <= choice_script <= 1:
                     break
                 else:
-                    print("Invalid input! Please enter a number between 0 and 3.")
+                    print("Invalid input! Please enter a number between 0 and 1.")
             except ValueError:
                 print("Invalid input! Please enter a valid integer.")
     elif folder_input == "":
@@ -60,37 +87,21 @@ Choices Information\n
         for key in ['shift', 'ctrl', 'alt', 'win']:
             pyautogui.keyUp(key)
         time.sleep(1) 
-        pyautogui.click(1364, 685)
+        pyautogui.click(12, 34)
         time.sleep(1)
-        pyautogui.hotkey('alt', 'd')
-        time.sleep(0.5)
-        pyautogui.write(r'C:\Users\TSEMotion\Desktop\Template File for AI')
-        time.sleep(0.5)
-        pyautogui.press('enter')
+        pyautogui.click(135, 75)
         time.sleep(1)
-        #pyautogui.click(980, 670)
-        #time.sleep(0.5)
-        #pyautogui.hotkey('ctrl', 'shift', '6') #FORCE DETAILS VIEW FOR EXPLORER
-        time.sleep(1)
-        pyautogui.press('tab', presses=6)
-        time.sleep(1)
+        template_folder = r'C:\Users\berna\Desktop\Simi Software and Utilities\Template Files'
         if choice_script == 0:
-            pyautogui.write('StandardProject.smp')                   
-            time.sleep(1)
-            pyautogui.press('enter')
+            template_name = 'StandardProject.smp'
         elif choice_script == 1:
-            pyautogui.write('StandardProjectNew.smp')
-            time.sleep(1)
-            pyautogui.press('enter')
-            # NOW THE NEW TEMPLATE IS OPENED
-        elif choice_script == 2 or choice_script==3:
-            pyautogui.write('StandardProjectFlipped.smp')
-            time.sleep(1)
-            pyautogui.press('enter')
-            # NOW THE NEW TEMPLATE IS OPENED
+            template_name = 'StandardProjectNew.smp'
         else:
             print('You did not input if the choice was new or old for this script!')
             return
+            
+        set_file_dialog_path(template_folder, template_name)
+        time.sleep(1)
             
         # GET VIDEO FILENAMES
         cutoff_date = datetime.datetime(2025, 10, 22)
@@ -104,7 +115,7 @@ Choices Information\n
             stat = p.stat()
 
             if sys.platform.startswith("win"):
-                ts = stat.st_birthtime
+                ts = stat.st_mtime                  # For files that were moved to another drive look into modified time instead --> mtime instead of ctime
             else:
                 if hasattr(stat, "st_birthtime"):  # macOS, BSD
                     ts = stat.st_birthtime
@@ -167,40 +178,19 @@ Choices Information\n
                 pyautogui.click(16, 35)
                 time.sleep(1)
                 # THESE COORDS ARE FOR TSE SOFTWARE ----> pyautogui.click(99, 218)
-                pyautogui.click(208, 197)
+                pyautogui.click(188, 225)
                 time.sleep(1)
-                pyautogui.doubleClick(1384,448) # ----> These coords work for both programs: TSE and SIMI
+                pyautogui.doubleClick(1410,446) # ----> These coords work for both programs: TSE and SIMI
                 time.sleep(1)
-                pyautogui.hotkey('alt', 'd')
+                set_file_dialog_path(folder_input, vid, confirm_twice=True)
                 time.sleep(0.5)
-                pyautogui.write(folder_input)
-                time.sleep(0.5)
-                pyautogui.press('enter')
-                time.sleep(0.5)
-                #pyautogui.click(980, 670)
-                #time.sleep(1)
-                #pyautogui.hotkey('ctrl', 'shift', '6') #FORCE DETAILS VIEW IN FOLDER EXPLORER
-                #time.sleep(1)
-                pyautogui.press('tab', presses=6) # Make sure the folders are on the DETAILS view
-                time.sleep(0.5)
-                pyautogui.write(vid)
-                time.sleep(0.5)
-                pyautogui.press('enter', presses=2)
+                for key in ['shift', 'ctrl', 'alt', 'win']:
+                    pyautogui.keyUp(key)
                 time.sleep(0.5)
                 pyautogui.hotkey('ctrl', 'shift', 's')
                 time.sleep(0.5)
-                pyautogui.hotkey('alt', 'd')
+                set_file_dialog_path(folder_input, vid[0:-4])
                 time.sleep(0.5)
-                pyautogui.write(folder_input)
-                time.sleep(0.5)
-                pyautogui.press('enter')
-                time.sleep(0.5)
-                pyautogui.press('tab', presses=6) # Make sure the folders are on the DETAILS view
-                time.sleep(1)
-                pyautogui.write(vid[0:-4])
-                time.sleep(0.5)
-                pyautogui.press('enter')
-                time.sleep(1)
                 #check_file = vid[0:-4]+".smp"
                 #Stop loop if there was an error creating smp file (missed input from pyautogui is the most plausible cause, this will stop escalating wrong inputs)
                 if any(vid[0:-4]+'.smp' in file for file in os.listdir(folder_input)):
@@ -215,20 +205,19 @@ Choices Information\n
                 pyautogui.click(16, 35)
                 time.sleep(1)
                 # THESE COORDS ARE FOR TSE SOFTWARE ----> pyautogui.click(99, 218)
-                pyautogui.click(208, 197)
+                pyautogui.click(188, 225)
                 time.sleep(1)
-                pyautogui.doubleClick(1384,448)
+                pyautogui.doubleClick(1410,446)
                 time.sleep(1)
-                pyautogui.write(vid)
+                set_file_dialog_path(None, vid, confirm_twice=True)
                 time.sleep(0.5)
-                pyautogui.press('enter', presses=2)
+                for key in ['shift', 'ctrl', 'alt', 'win']:
+                    pyautogui.keyUp(key)
                 time.sleep(0.5)
                 pyautogui.hotkey('ctrl', 'shift', 's')
                 time.sleep(0.5)
-                pyautogui.write(vid[0:-4])
+                set_file_dialog_path(None, vid[0:-4])
                 time.sleep(0.5)
-                pyautogui.press('enter')
-                time.sleep(1)
                 #Stop loop if there was an error creating smp file (missed input from pyautogui is the most plausible cause, this will stop escalating wrong inputs)
                 if any(vid[0:-4]+'.smp' in file for file in os.listdir(folder_input)):
                     logging.debug(f'SMP file already exists: {vid[0:-4]+".smp"}')
