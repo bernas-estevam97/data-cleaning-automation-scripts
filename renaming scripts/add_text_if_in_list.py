@@ -1,44 +1,34 @@
 import os
 
-# Function to search for .avi files matching the list in the text file
 def find_avi_files_in_directory(directory, txt_file, extensions):
+    """Rename matched files to add _not_processed before their extension."""
     try:
-        # Read filenames from the txt file
         with open(txt_file, 'r') as f:
-            filenames_to_find = [line.strip() for line in f.readlines()]
-        # Get the list of all files in the specified directory
-        files_in_directory = os.listdir(directory)
+            filenames_to_find = [line.strip() for line in f.readlines() if line.strip()]
 
-        # Search for .avi files that match those in the txt file
+        files_in_directory = set(os.listdir(directory))
+
         for idx, filename in enumerate(filenames_to_find):
             for ext in extensions:
-                file_with_extension = f"{filename}{ext}"
-                if file_with_extension in files_in_directory:
-                    #RENAMING
-                    
-                    os.rename(os.path.join(directory_to_search, file_with_extension), os.path.join(directory_to_search, os.path.splitext(file_with_extension)[0] + "_" + 'not_processed' + os.path.splitext(file_with_extension)[1]))
-                    print(f'File {idx+1}:{file_with_extension} renamed to --> {file_with_extension}_not_processed.avi')
-                    
-                    #DELETING
-                    
-                    #file_path = os.path.join(directory, file_with_extension)  # Full path to the file
-                    #os.remove(file_path)  # Delete the file
-                    #print(f"Deleted: {file_with_extension}")
+                full_filename = f"{filename}{ext}"
+                if full_filename in files_in_directory:
+                    # Build the new filename: keep original extension, add prefix before it
+                    new_filename = full_filename.rsplit('.', 1)[0] + '_not_processed.' + ext
+                    src = os.path.join(directory, full_filename)
+                    dst = os.path.join(directory, new_filename)
+                    os.rename(src, dst)
+                    print(f'  [{idx+1}] {full_filename} → {new_filename}')
                 else:
-                    print(f"ID: {idx+1} Not Found: {file_with_extension}")
+                    print(f'  [{idx+1}] NOT FOUND: {full_filename}')
 
     except FileNotFoundError:
-        print(f"The file '{txt_file}' was not found.")
+        print(f"The txt file not found: '{txt_file}'")
     except Exception as e:
         print(f"An error occurred: {e}")
 
-# Define the folder to search and the path to the text file
-directory_to_search = input('What folder you which to look in? ')  # Replace with your folder path
-txt_file_path = input('Which file has your filenames to look into? ')  # Replace with your txt file path
+if __name__ == '__main__':
+    folder = input('Directory you want to search in? ')
+    txt_file = input('Path to the text file with filenames? ')
+    extensions_to_check = ['.avi']
 
-# Define the extensions to check for (e.g., .avi, .mp4, .mov)
-extensions_to_check = ['.avi', '.smp', '_out.smp']  # Add more extensions as needed
-
-#C:\Users\berna\Documents\Coding Projects\simi scripts\video_not_run.txt
-# Run the function
-find_avi_files_in_directory(directory_to_search, txt_file_path, extensions_to_check)
+    find_avi_files_in_directory(folder, txt_file, extensions_to_check)
