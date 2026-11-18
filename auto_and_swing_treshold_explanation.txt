@@ -1,0 +1,42 @@
+Two separate prompts in optimized_excel_filtering_v2.py. "auto" is the floor reference setting. The swing threshold is a different setting. They do not depend on each other.
+
+1. Floor reference: auto vs fixed
+
+The prompt is "Floor reference - auto (measured per session) or fixed (old/new constants)?" (optimized_excel_filtering_v2.py:408).
+
+Height, clearance and drag columns must be measured relative to the floor. The script finds them by name: any column with "Height", "Clearance" or "Drag" in its name (height_columns, line 149). It sorts them by camera view:
+- Right view (upside down): column mean > 0.3 m. These values are raw Y around 0.5 m.
+- Left view (normal): everything else. These values are already near 0.
+
+auto (lines 271-282) measures the floor separately for each session:
+- It uses the hind toe markers Paw/Tao/Hind/Right_Y and Paw/Tao/Hind/Left_Y. The paw rests on the ground for most of stance, so its low values show where the floor is.
+- Left floor = 10th percentile of left hind toe Y (FLOOR_PCT = 10).
+- Right floor = 90th percentile of |right hind toe Y|, because that view is upside down and the floor is the largest Y.
+- It uses only frames inside the movement window. If height cutoff = yes, it also stops at the cutoff time, so the floor comes from the same frames whose heights are kept.
+- Then: right columns = floor_r - value, left columns = value - floor_l.
+- If the hind toe columns are missing, heights stay unchanged and a warning is logged.
+- The log line shows floor R=… L=… for each file.
+
+fixed (lines 283-289) works like the old script. It uses the constants in SUBTRACTION_MAP and OFFSET_MAP, chosen by (species, experiment, old/new). It adds the offset to all height columns, then sets right columns = constant - value.
+
+Why auto exists: the camera origin is fixed, but the ground level changes between experiments and setups. One constant per setup was the reason for the short or odd heights in some sessions.
+
+2. Paw swing speed threshold
+
+The prompt is "Paw swing speed threshold in m/s (Enter = 0.1, 0 = keep stance frames)" (line 411). The default is SWING_SPEED_DEFAULT = 0.1 m/s.
+
+For each paw (Front/Hind × Left/Right), lines 292-301 do this:
+1. Find that paw's Vx, Vy, Speed, Ax, Ay and |Acc| columns.
+2. If a column is all zeros, it is leftover from the old outlier filter and has no data. The script sets it to NaN and logs a warning.
+3. If threshold > 0: every frame where {paw} Speed (m/s) ≤ threshold counts as stance. For those frames, the script sets all of that paw's velocity and acceleration columns to NaN. The kept frames are swing frames.
+4. If threshold = 0: no frames are masked, so stance frames stay in.
+
+The stats (mean, max, CV and so on) are then calculated over swing frames only.
+
+Why 0.1 m/s:
+- The old script masked frames where speed == 0. That no longer works because v2 recalculates speed from positions with a Savitzky-Golay derivative (window 5, order 2). That derivative is almost never exactly 0.
+- In real data, stance jitter stays below about 0.05 m/s and swing peaks reach 0.5-1.4 m/s. 0.1 m/s sits in the gap between them.
+
+The masking only affects the paw velocity and acceleration columns. Heights, angles and step lengths are not affected by the swing threshold.
+
+The script has two copies: Python-Scripts-Automation\ and Flet-Data-Processing\. I read the Python-Scripts-Automation\ copy. The lines that matched in the search are identical in both.
