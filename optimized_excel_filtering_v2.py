@@ -58,6 +58,13 @@ SWING_SPEED_DEFAULT = 0.1    # m/s; paw speed above this = swing. 0 keeps every 
 # swimming not measured -> SWING_SPEED_DEFAULT.
 SWING_SPEED_BY_EXPERIMENT = {"groundwalk": 0.1, "gridwalk": 0.1, "beamwalk": 0.03}
 FLOOR_PCT = 10               # floor = 10th percentile of left hind toe Y (90th in the upside-down right view)
+FROZEN_MIN_REPEATS = 1      # a marker whose X and Y repeat EXACTLY for this many frames is a tracker placeholder
+                             # (real smoothed positions always change a little, even on a resting paw)
+# Implausible-position checks (v2). Real paw moves in a clean session: <= ~18 mm/frame; tracking jumps: 40-65 mm.
+NOSE_EXIT_TOL = 0.001        # m; the window ends at the first frame the nose is this close to its exit (final) X
+MAX_JUMP_M = 0.03            # m per frame (3 m/s at 100 fps); a measured marker moving more than this = tracking jump
+HIND_AHEAD_TOL = 0.01        # m; hind paw more than this ahead of the front paw on the same side = label swap
+BODY_LENGTH_RANGE = (0.7, 1.3)  # nose-tail base distance allowed, as a fraction of the session median
 
 # --- Kinematics rebuilt from 'Positions (used)' ---
 # The calculations_*.py scripts run remove_outliers() (median/MAD z-score) on every metric before saving the
@@ -169,6 +176,77 @@ def session_floors(raw_win):
     return floor_r, floor_l
 
 
+def measured_markers():
+    """Markers used by at least one rebuilt measurement (only these are reported in the placeholder warning)."""
+    used = {m for m, _ in Y_METRICS.values()}
+    used |= {m for pair in DIST_METRICS.values() for m in pair}
+    used |= {m for trio in ANGLE_METRICS.values() for m in trio}
+    used |= {f'Paw/{fh}/{side}' for fh in ('Front', 'Hind') for side in ('Left', 'Right')}
+    return used
+
+
+def mask_placeholders(pos, min_repeats=FROZEN_MIN_REPEATS):
+    """(v2) Tracker placeholders -> NaN. When a marker is lost, its position is held at the last value (or at a
+    fixed value before it was first seen), so X and Y repeat exactly. Every repeated frame is set to NaN; the
+    first frame of a hold is the last real position and is kept, unless the hold starts at frame 0.
+    Returns (masked copy, {marker: boolean Series of masked frames})."""
+    out = pos.copy()
+    held_by_marker = {}
+    for x in [c for c in pos.columns if isinstance(c, str) and c.endswith('_X')]:
+        y = x[:-2] + '_Y'
+        if y not in pos.columns:
+            continue
+        same = (pos[x].diff().abs() <= 1e-12) & (pos[y].diff().abs() <= 1e-12)
+        run_id = (~same).cumsum()                                # a real frame followed by its repeats
+        run_len = same.groupby(run_id).transform('sum')         # number of repeats in that hold
+        held = same & (run_len >= min_repeats)
+        if len(pos) > 1 and run_len.iloc[0] >= min_repeats:     # held from the first frame: nothing real
+            held |= run_id == run_id.iloc[0]
+        if held.any():
+            out.loc[held, [x, y]] = np.nan
+            held_by_marker[x[len(_P):-2]] = held
+    return out, held_by_marker
+
+
+def mask_implausible(pos, last_index):
+    """(v2) Positions a walking mouse cannot produce -> NaN (run after mask_placeholders).
+    1. Body checks in the ventral view -> the WHOLE frame (we cannot tell which marker is wrong):
+       nose behind a hind paw; hind paw more than HIND_AHEAD_TOL ahead of the front paw on the same side;
+       nose-tail base length outside BODY_LENGTH_RANGE x the session median.
+    2. Jump: a measured marker moving more than MAX_JUMP_M in one frame -> that marker, that frame.
+    A check is skipped in frames where its markers are missing. Returns (masked copy, bad frames, {marker: jumps})."""
+    out = pos.copy()
+    bad = pd.Series(False, index=pos.index)
+    nx, ny = _xy(pos, 'Head/Nose')
+    if nx is not None:
+        nose = nx.iloc[:last_index + 1].dropna()
+        direction = np.sign(nose.iloc[-1] - nose.iloc[0]) if len(nose) > 1 and nose.iloc[-1] != nose.iloc[0] else 1.0
+        for side in ('Left', 'Right'):
+            hx, fx = _xy(pos, 'Paw/Hind/' + side)[0], _xy(pos, 'Paw/Front/' + side)[0]
+            if hx is not None:
+                bad |= direction * (hx - nx) > 0                    # nose behind a hind paw
+                if fx is not None:
+                    bad |= direction * (hx - fx) > HIND_AHEAD_TOL   # hind paw well ahead of the front paw
+        bx, by = _xy(pos, 'Tail/Base')
+        if bx is not None:
+            length = np.hypot(nx - bx, ny - by)
+            med = length.iloc[:last_index + 1].median()
+            if pd.notna(med) and med > 0:
+                bad |= (length < BODY_LENGTH_RANGE[0] * med) | (length > BODY_LENGTH_RANGE[1] * med)
+    marker_cols = [c for c in out.columns if isinstance(c, str) and c.startswith(_P) and c[-2:] in ('_X', '_Y')]
+    out.loc[bad, marker_cols] = np.nan
+    jumps = {}  # after the body checks, so a jump does not hide the frame from them
+    for m in sorted(measured_markers() | {'Head/Nose', 'Tail/Base'}):
+        x, y = _xy(pos, m)
+        if x is None:
+            continue
+        jump = (np.hypot(x.diff(), y.diff()) > MAX_JUMP_M) & ~bad
+        if jump.any():
+            out.loc[jump, [_P + m + '_X', _P + m + '_Y']] = np.nan
+            jumps[m] = jump
+    return out, bad, jumps
+
+
 def paw_kinematic_columns(df):
     """{'Front Right': [its Vx, Vy, Speed, Ax, Ay, |Acc| columns], ...}"""
     out = {}
@@ -179,7 +257,7 @@ def paw_kinematic_columns(df):
     return out
 
 
-def qc_values(raw_win, kin):
+def qc_values(raw_win, kin, swap_win=None):
     """Per-session tracking checks.
     - Tracked frames: % of window frames where all four paws have a position.
     - Step Length SD: ~0 means front and hind markers move as one (tracker locked both on one paw).
@@ -191,8 +269,10 @@ def qc_values(raw_win, kin):
         qc['QC Tracked Frames (%)'] = 100 * raw_win[paws].notna().all(axis=1).mean()
         nose = raw_win['/Feature/Head/Nose_X'].dropna() if '/Feature/Head/Nose_X' in raw_win else pd.Series(dtype=float)
         direction = np.sign(nose.iloc[-1] - nose.iloc[0]) if len(nose) > 1 else 1.0
-        ahead = [(direction * (raw_win[f'/Feature/Paw/Hind/{s}_X'] - raw_win[f'/Feature/Paw/Front/{s}_X']) > 0)
-                 for s in ('Left', 'Right')]
+        sw = raw_win if swap_win is None else swap_win  # positions before the body checks removed the swaps
+        lead = [direction * (sw[f'/Feature/Paw/Hind/{s}_X'] - sw[f'/Feature/Paw/Front/{s}_X'])
+                for s in ('Left', 'Right')]
+        ahead = [(d > 0)[d.notna()] for d in lead]  # only frames where both paws have a real position
         qc['QC Hind Ahead of Front (%)'] = 100 * pd.concat(ahead).mean()
     for side in ('Left', 'Right'):
         c = f'Step Length ({side})'
@@ -249,12 +329,30 @@ def filter_excel_by_column(file_info_tuple, choice, animal_choice, experiment, o
             else:
                 last_index = len(df_raw_clean) - 1
 
+            # (v2) End = FIRST frame the nose reaches its exit position. After the nose leaves the frame the tracker
+            #      can keep inventing nose positions, which the "last change" rule above counts as movement.
+            if nose_col in df_raw_clean.columns:
+                at_exit = df_raw_clean.index[(df_raw_clean[nose_col] - final_static_val).abs() <= NOSE_EXIT_TOL]
+                at_exit = at_exit[at_exit >= start_index]
+                if not at_exit.empty and at_exit[0] < last_index:
+                    t_exit, t_last = df_raw_clean.loc[at_exit[0], 'Time'], df_raw_clean.loc[last_index, 'Time']
+                    if t_last - t_exit > 0.05:
+                        captured_warnings.append(
+                            f"Nose reached its exit position at {t_exit:.2f}s but kept 'moving' until {t_last:.2f}s "
+                            f"(tracking after the nose left): window ends at {t_exit:.2f}s.")
+                    last_index = at_exit[0]
+
             # 3. Kinematics rebuilt from positions (v2), then cut to the movement window
             for col in df_kin_clean.columns:
                 if col != 'Time':
                     df_kin_clean[col] = pd.to_numeric(df_kin_clean[col], errors='coerce').astype(float)
             raw_win = df_raw_clean.iloc[start_index : last_index + 1]
-            df_kin_full, kept = kinematics_from_positions(df_raw_clean, df_kin_clean)
+            # (v2) Placeholder positions -> NaN for every measurement, floor and QC. Start/end and height cutoff
+            #      detection keep the raw values (the start rule relies on the tail tip's placeholder).
+            pos_holds, held = mask_placeholders(df_raw_clean)
+            pos_real, implausible, jumps = mask_implausible(pos_holds, last_index)
+            raw_win_real = pos_real.iloc[start_index : last_index + 1]
+            df_kin_full, kept = kinematics_from_positions(pos_real, df_kin_clean)
             if kept:
                 captured_warnings.append(f"Kept from Kinematics sheet (no formula / markers missing): {', '.join(kept)}")
             df_kin_filtered = df_kin_full.iloc[start_index : last_index + 1].copy()
@@ -269,12 +367,59 @@ def filter_excel_by_column(file_info_tuple, choice, animal_choice, experiment, o
                     if not hind_reach.empty:
                         hind_timestamp = df_raw_clean.loc[hind_reach.index[0], "Time"]
 
+            # 3b. (v2) Start marker appeared only AFTER the height cutoff (e.g. tail tip came into view after the
+            #     hind paw passed the cutoff X): no frame of the window is before the cutoff. Height columns only
+            #     need paw/hip/PSIS markers, so they are taken from the frames between the hind paws' first
+            #     movement and the cutoff. Time duration and every other column keep the start-marker window.
+            height_start = start_index
+            if hind_timestamp is not None and 'Time' in df_raw_clean.columns \
+                    and hind_timestamp < df_raw_clean.loc[start_index, 'Time']:
+                paws = CHOICE_MAP["3"]
+                paw_start = 0
+                if all(p in df_raw_clean.columns for p in paws):
+                    moved = ((df_raw_clean[paws] - df_raw_clean[paws].iloc[0]).abs() > threshold).any(axis=1)
+                    paw_start = df_raw_clean.index[moved][0] if moved.any() else 0
+                if paw_start < start_index:
+                    height_start = paw_start
+                    df_kin_filtered = df_kin_full.iloc[height_start : last_index + 1].copy()
+                    captured_warnings.append(
+                        f"Start marker appeared at {df_raw_clean.loc[start_index, 'Time']:.2f}s, after the height cutoff "
+                        f"({hind_timestamp:.2f}s): heights taken from hind paw movement start "
+                        f"({df_raw_clean.loc[height_start, 'Time']:.2f}s) to the cutoff; other columns and "
+                        f"Time Duration still use the start-marker window.")
+
+            # (v2) Report placeholders inside the frames that are measured (markers used by a measurement only)
+            first_frame = min(start_index, height_start)
+            used = measured_markers()
+            in_win = {m: h.iloc[first_frame : last_index + 1] for m, h in held.items() if m in used}
+            in_win = {m: h for m, h in in_win.items() if h.any()}
+            if in_win:
+                captured_warnings.append("Placeholder (frozen) positions removed from measurements: " + "; ".join(
+                    f"{m} {int(h.sum())} frames, first at {df_raw_clean.loc[h.idxmax(), 'Time']:.2f}s"
+                    for m, h in sorted(in_win.items())))
+            bad_win = implausible.iloc[first_frame : last_index + 1]
+            jumps_win = {m: j.iloc[first_frame : last_index + 1] for m, j in jumps.items()}
+            jumps_win = {m: j for m, j in jumps_win.items() if j.any()}
+            if bad_win.any() or jumps_win:
+                parts = []
+                if bad_win.any():
+                    parts.append(f"{int(bad_win.sum())} frames failed the body checks (whole frame removed), first at "
+                                 f"{df_raw_clean.loc[bad_win.idxmax(), 'Time']:.2f}s")
+                parts += [f"{m} jump in {int(j.sum())} frames, first at {df_raw_clean.loc[j.idxmax(), 'Time']:.2f}s"
+                          for m, j in sorted(jumps_win.items())]
+                captured_warnings.append("Implausible positions removed from measurements: " + "; ".join(parts))
+
             # 4. Heights relative to the floor (v2: columns picked by NAME, not position)
             info = []
             right_cols, left_cols = height_columns(df_kin_filtered)
+            if height_start < start_index:  # rows before the window start carry heights only (see 3b)
+                other_cols = [c for c in df_kin_filtered.columns if c != 'Time' and c not in right_cols + left_cols]
+                df_kin_filtered.loc[df_kin_filtered.index < start_index, other_cols] = np.nan
+                info.append(f"heights from {df_raw_clean.loc[height_start, 'Time']:.2f}s")
+            raw_heights = pos_real.iloc[height_start : last_index + 1]
             if floor_mode == "auto":
                 # Floor from the same frames the heights are kept for (before the height cutoff)
-                height_win = raw_win if hind_timestamp is None else raw_win[raw_win['Time'] <= hind_timestamp]
+                height_win = raw_heights if hind_timestamp is None else raw_heights[raw_heights['Time'] <= hind_timestamp]
                 floor_r, floor_l = session_floors(height_win)
                 if right_cols and floor_r is not None:
                     df_kin_filtered[right_cols] = floor_r - df_kin_filtered[right_cols]
@@ -321,12 +466,18 @@ def filter_excel_by_column(file_info_tuple, choice, animal_choice, experiment, o
                 df_kin_filtered.loc[mask_time, right_cols + left_cols] = np.nan
 
             # 5c. Quality-control columns (constant per session, so they reach the merged file as measurements)
-            for name, value in qc_values(raw_win, df_kin_filtered).items():
+            for name, value in qc_values(raw_win_real, df_kin_filtered, pos_holds.iloc[start_index : last_index + 1]).items():
                 df_kin_filtered[name] = value
 
             # 6. Statistics and Saving
-            time_series = df_kin_filtered['Time'].dropna() if 'Time' in df_kin_filtered.columns else pd.Series(dtype=float)
+            time_series = raw_win['Time'].dropna() if 'Time' in raw_win.columns else pd.Series(dtype=float)
             time_duration = (time_series.iloc[-1] - time_series.iloc[0]) if not time_series.empty else 0
+
+            # Height Window: first and last time (s) of the frames the height columns were taken from
+            height_times = df_raw_clean['Time'].iloc[height_start : last_index + 1] if 'Time' in df_raw_clean.columns else pd.Series(dtype=float)
+            if hind_timestamp is not None:
+                height_times = height_times[height_times <= hind_timestamp]
+            height_window = (height_times.iloc[0], height_times.iloc[-1]) if not height_times.empty else (np.nan, np.nan)
             stats_cols = [col for col in df_kin_filtered.columns if col != 'Time']
             
             # --- CUSTOM STATISTIC: max_norm_mean (Safe against empty slices) ---
@@ -372,6 +523,12 @@ def filter_excel_by_column(file_info_tuple, choice, animal_choice, experiment, o
                 row_data[1] = time_duration
             duration_df = pd.DataFrame([row_data], columns=df_kin_filtered.columns)
 
+            hw_row = [np.nan] * len(df_kin_filtered.columns)
+            hw_row[0] = 'Height Window (start, end s)'
+            if len(hw_row) > 2:
+                hw_row[1], hw_row[2] = height_window
+            height_window_df = pd.DataFrame([hw_row], columns=df_kin_filtered.columns)
+
             engine = 'xlsxwriter' if importlib.util.find_spec('xlsxwriter') else 'openpyxl'
             with pd.ExcelWriter(output_file, engine=engine) as writer:
                 df_raw.to_excel(writer, sheet_name='Positions (used)', index=False)
@@ -379,6 +536,8 @@ def filter_excel_by_column(file_info_tuple, choice, animal_choice, experiment, o
                 start_row = len(df_kin_filtered) + 2
                 duration_df.to_excel(writer, sheet_name='Kinematics', startrow=start_row, index=False, header=False)
                 stats_output.to_excel(writer, sheet_name='Kinematics', startrow=start_row + 1, index=False, header=False)
+                height_window_df.to_excel(writer, sheet_name='Kinematics', startrow=start_row + 1 + len(stats_output),
+                                          index=False, header=False)
 
             for w in w_log:
                 captured_warnings.append(f"{w.category.__name__}: {str(w.message)}")
