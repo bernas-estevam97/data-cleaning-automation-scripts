@@ -69,6 +69,9 @@ MAX_JUMP_M = 0.03            # m per frame (3 m/s at 100 fps); a measured marker
 HIND_AHEAD_TOL = 0.01        # m; hind paw more than this ahead of the front paw on the same side = label swap
 BODY_LENGTH_RANGE = (0.7, 1.3)  # nose-tail base distance allowed, as a fraction of the session median
 MAX_BAD_FRACTION = 0.2       # more of the window than this failing the body checks = nose track broken: warn
+SPIKE_MAX_M = 0.008          # m; a marker that jumps out and straight back by more than this in one frame = jitter
+                             # (805-file test: footprint never exceeds ~6 mm; beam jitter reaches 20 mm)
+MIN_TRACKED_PCT = 70         # warn when fewer than this % of the window frames have all four paws tracked
 
 # --- Kinematics rebuilt from 'Positions (used)' ---
 # The calculations_*.py scripts run remove_outliers() (median/MAD z-score) on every metric before saving the
@@ -212,19 +215,35 @@ def mask_placeholders(pos, min_repeats=FROZEN_MIN_REPEATS):
     return out, held_by_marker
 
 
+def walking_direction(pos, last_index):
+    """+1 or -1: direction of travel along X, from the mean of the four ventral paws (more robust than the nose,
+    whose track can be broken)."""
+    cols = [f'{_P}Paw/{fh}/{sd}_X' for fh in ('Front', 'Hind') for sd in ('Left', 'Right')]
+    cols = [c for c in cols if c in pos.columns]
+    if not cols:
+        return 1.0
+    mean_x = pos[cols].iloc[:last_index + 1].mean(axis=1).dropna()
+    if len(mean_x) < 2 or mean_x.iloc[-1] == mean_x.iloc[0]:
+        return 1.0
+    return float(np.sign(mean_x.iloc[-1] - mean_x.iloc[0]))
+
+
 def mask_implausible(pos, last_index):
     """(v2) Positions a walking mouse cannot produce -> NaN (run after mask_placeholders).
     1. Body checks in the ventral view -> the WHOLE frame (we cannot tell which marker is wrong):
        nose behind a hind paw; hind paw more than HIND_AHEAD_TOL ahead of the front paw on the same side;
        nose-tail base length outside BODY_LENGTH_RANGE x the session median.
     2. Jump: a measured marker moving more than MAX_JUMP_M in one frame -> that marker, that frame.
-    A check is skipped in frames where its markers are missing. Returns (masked copy, bad frames, {marker: jumps})."""
+    3. Spike: a measured marker that leaves the midpoint of its neighbouring frames by more than SPIKE_MAX_M and
+       comes straight back (tracking jitter, frequent on the beam) -> that marker, that frame. Tail markers are
+       excluded because the tail can genuinely whip that fast.
+    A check is skipped in frames where its markers are missing.
+    Returns (masked copy, bad frames, {marker: jumps}, {marker: spikes})."""
     out = pos.copy()
     bad = pd.Series(False, index=pos.index)
     nx, ny = _xy(pos, 'Head/Nose')
     if nx is not None:
-        nose = nx.iloc[:last_index + 1].dropna()
-        direction = np.sign(nose.iloc[-1] - nose.iloc[0]) if len(nose) > 1 and nose.iloc[-1] != nose.iloc[0] else 1.0
+        direction = walking_direction(pos, last_index)
         for side in ('Left', 'Right'):
             hx, fx = _xy(pos, 'Paw/Hind/' + side)[0], _xy(pos, 'Paw/Front/' + side)[0]
             if hx is not None:
@@ -248,7 +267,19 @@ def mask_implausible(pos, last_index):
         if jump.any():
             out.loc[jump, [_P + m + '_X', _P + m + '_Y']] = np.nan
             jumps[m] = jump
-    return out, bad, jumps
+    spikes = {}  # on what is left after the checks above; not on the tail, which can really whip this fast
+    for m in sorted(measured_markers() | {'Head/Nose'}):
+        xc, yc = _P + m + '_X', _P + m + '_Y'
+        if m.startswith('Tail/') or xc not in out.columns or yc not in out.columns:
+            continue
+        x, y = out[xc], out[yc]
+        dev = np.hypot(x - (x.shift(1) + x.shift(-1)) / 2, y - (y.shift(1) + y.shift(-1)) / 2)
+        out_and_back = ((x - x.shift(1)) * (x.shift(-1) - x) + (y - y.shift(1)) * (y.shift(-1) - y)) < 0
+        spike = (dev > SPIKE_MAX_M) & out_and_back
+        if spike.any():
+            out.loc[spike, [xc, yc]] = np.nan
+            spikes[m] = spike
+    return out, bad, jumps, spikes
 
 
 def paw_kinematic_columns(df):
@@ -271,8 +302,7 @@ def qc_values(raw_win, kin, swap_win=None):
     qc = {}
     if all(p in raw_win for p in paws):
         qc['QC Tracked Frames (%)'] = 100 * raw_win[paws].notna().all(axis=1).mean()
-        nose = raw_win['/Feature/Head/Nose_X'].dropna() if '/Feature/Head/Nose_X' in raw_win else pd.Series(dtype=float)
-        direction = np.sign(nose.iloc[-1] - nose.iloc[0]) if len(nose) > 1 else 1.0
+        direction = walking_direction(raw_win, len(raw_win) - 1)
         sw = raw_win if swap_win is None else swap_win  # positions before the body checks removed the swaps
         lead = [direction * (sw[f'/Feature/Paw/Hind/{s}_X'] - sw[f'/Feature/Paw/Front/{s}_X'])
                 for s in ('Left', 'Right')]
@@ -328,6 +358,18 @@ def filter_excel_by_column(file_info_tuple, choice, animal_choice, experiment, o
             nose_col = '/Feature/Head/Nose_X'
             if nose_col in df_raw_clean.columns:
                 final_static_val = df_raw_clean[nose_col].iloc[-1]
+                # (v2) A glitch in the last few frames, after the nose's final freeze at the exit, must not move
+                #      the exit position: use the frozen value instead.
+                nx_ = df_raw_clean[nose_col]
+                ny_ = df_raw_clean['/Feature/Head/Nose_Y'] if '/Feature/Head/Nose_Y' in df_raw_clean.columns else nx_
+                same_ = (nx_.diff().abs() <= 1e-12) & (ny_.diff().abs() <= 1e-12)
+                len_ = same_.groupby((~same_).cumsum()).transform('sum')
+                holds_ = df_raw_clean.index[~same_ & (len_ >= NOSE_HOLD_FRAMES)]
+                if len(holds_):
+                    h_ = holds_[-1]
+                    trailing = len(df_raw_clean) - 1 - (h_ + int(len_[h_]))
+                    if 0 < trailing <= 3:
+                        final_static_val = nx_[h_]
                 end_movement_indices = df_raw_clean.index[(df_raw_clean[nose_col] - final_static_val).abs() > threshold]
                 last_index = end_movement_indices[-1] if not end_movement_indices.empty else len(df_raw_clean) - 1
             else:
@@ -364,7 +406,7 @@ def filter_excel_by_column(file_info_tuple, choice, animal_choice, experiment, o
             # (v2) Placeholder positions -> NaN for every measurement, floor and QC. Start/end and height cutoff
             #      detection keep the raw values (the start rule relies on the tail tip's placeholder).
             pos_holds, held = mask_placeholders(df_raw_clean)
-            pos_real, implausible, jumps = mask_implausible(pos_holds, last_index)
+            pos_real, implausible, jumps, spikes = mask_implausible(pos_holds, last_index)
             raw_win_real = pos_real.iloc[start_index : last_index + 1]
             df_kin_full, kept = kinematics_from_positions(pos_real, df_kin_clean)
             if kept:
@@ -414,14 +456,25 @@ def filter_excel_by_column(file_info_tuple, choice, animal_choice, experiment, o
             bad_win = implausible.iloc[first_frame : last_index + 1]
             jumps_win = {m: j.iloc[first_frame : last_index + 1] for m, j in jumps.items()}
             jumps_win = {m: j for m, j in jumps_win.items() if j.any()}
-            if bad_win.any() or jumps_win:
+            spikes_win = {m: k.iloc[first_frame : last_index + 1] for m, k in spikes.items()}
+            spikes_win = {m: k for m, k in spikes_win.items() if k.any()}
+            if bad_win.any() or jumps_win or spikes_win:
                 parts = []
                 if bad_win.any():
                     parts.append(f"{int(bad_win.sum())} frames failed the body checks (whole frame removed), first at "
                                  f"{df_raw_clean.loc[bad_win.idxmax(), 'Time']:.2f}s")
                 parts += [f"{m} jump in {int(j.sum())} frames, first at {df_raw_clean.loc[j.idxmax(), 'Time']:.2f}s"
                           for m, j in sorted(jumps_win.items())]
+                if spikes_win:
+                    parts.append("jitter spikes in " + str(int(sum(k.sum() for k in spikes_win.values()))) + " marker frames")
                 captured_warnings.append("Implausible positions removed from measurements: " + "; ".join(parts))
+            if nose_col in df_raw_clean.columns:
+                nose_start = df_raw_clean[nose_col].iloc[start_index]
+                if pd.notna(nose_start) and walking_direction(df_raw_clean, last_index) * (final_static_val - nose_start) < 0:
+                    captured_warnings.append(
+                        "CHECK THIS VIDEO: the nose ends behind where it started while the paws move forward. The nose "
+                        "track is broken; it sets the end of the window, so Time Duration and the measurements are "
+                        "not reliable.")
             bad_main = implausible.iloc[start_index : last_index + 1]
             if len(bad_main) and bad_main.mean() > MAX_BAD_FRACTION:
                 captured_warnings.append(
@@ -486,8 +539,14 @@ def filter_excel_by_column(file_info_tuple, choice, animal_choice, experiment, o
                 df_kin_filtered.loc[mask_time, right_cols + left_cols] = np.nan
 
             # 5c. Quality-control columns (constant per session, so they reach the merged file as measurements)
-            for name, value in qc_values(raw_win_real, df_kin_filtered, pos_holds.iloc[start_index : last_index + 1]).items():
+            qc = qc_values(raw_win_real, df_kin_filtered, pos_holds.iloc[start_index : last_index + 1])
+            for name, value in qc.items():
                 df_kin_filtered[name] = value
+            tracked = qc.get('QC Tracked Frames (%)')
+            if tracked is not None and pd.notna(tracked) and tracked < MIN_TRACKED_PCT:
+                captured_warnings.append(
+                    f"Low tracking: all four paws are tracked in only {tracked:.0f}% of the window; paw-based results "
+                    f"rest on fewer frames than usual.")
 
             # 6. Statistics and Saving
             time_series = raw_win['Time'].dropna() if 'Time' in raw_win.columns else pd.Series(dtype=float)
