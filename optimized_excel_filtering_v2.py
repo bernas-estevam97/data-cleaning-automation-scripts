@@ -281,7 +281,18 @@ def filter_excel_by_column(file_info_tuple, choice, animal_choice, experiment, o
                 if left_cols and floor_l is not None:
                     df_kin_filtered[left_cols] = df_kin_filtered[left_cols] - floor_l
                 if (right_cols and floor_r is None) or (left_cols and floor_l is None):
-                    captured_warnings.append("Floor not estimated (hind toe columns missing); heights left as is.")
+                    toe_cols = ('/Feature/Paw/Tao/Hind/Right_Y', '/Feature/Paw/Tao/Hind/Left_Y')
+                    if not all(c in raw_win for c in toe_cols):
+                        reason = "hind toe columns missing"
+                    elif height_win.empty and hind_timestamp is not None and not raw_win.empty:
+                        reason = (f"height cutoff ({hind_timestamp:.2f}s) is before the movement window starts "
+                                  f"({raw_win['Time'].iloc[0]:.2f}s), so no frames are left for the floor and all "
+                                  f"height columns are blanked; check the tracking of the start marker")
+                    elif height_win.empty:
+                        reason = "movement window is empty"
+                    else:
+                        reason = "hind toe has no tracked positions in the window"
+                    captured_warnings.append(f"Floor not estimated ({reason}); heights left as is.")
                 info.append(f"floor R={floor_r if floor_r is None else round(floor_r, 4)} "
                             f"L={floor_l if floor_l is None else round(floor_l, 4)}")
             else:  # fixed: original SUBTRACTION_MAP / OFFSET_MAP values
