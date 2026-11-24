@@ -61,10 +61,14 @@ FLOOR_PCT = 10               # floor = 10th percentile of left hind toe Y (90th 
 FROZEN_MIN_REPEATS = 1      # a marker whose X and Y repeat EXACTLY for this many frames is a tracker placeholder
                              # (real smoothed positions always change a little, even on a resting paw)
 # Implausible-position checks (v2). Real paw moves in a clean session: <= ~18 mm/frame; tracking jumps: 40-65 mm.
-NOSE_EXIT_TOL = 0.001        # m; the window ends at the first frame the nose is this close to its exit (final) X
+NOSE_EXIT_TOL = 0.001        # m; the window ends at the first frame the nose is this close to its exit (final) X...
+NOSE_HOLD_FRAMES = 5         # ...or at the first frame the nose freezes for this many frames (stopped being tracked)
+NOSE_EXIT_ZONE = 0.02        # m; ...but only a freeze this close to the exit counts (mid-walk freezes, e.g. the nose
+                             # hidden by the beam, are placeholders, not the end of the trial)
 MAX_JUMP_M = 0.03            # m per frame (3 m/s at 100 fps); a measured marker moving more than this = tracking jump
 HIND_AHEAD_TOL = 0.01        # m; hind paw more than this ahead of the front paw on the same side = label swap
 BODY_LENGTH_RANGE = (0.7, 1.3)  # nose-tail base distance allowed, as a fraction of the session median
+MAX_BAD_FRACTION = 0.2       # more of the window than this failing the body checks = nose track broken: warn
 
 # --- Kinematics rebuilt from 'Positions (used)' ---
 # The calculations_*.py scripts run remove_outliers() (median/MAD z-score) on every metric before saving the
@@ -329,18 +333,28 @@ def filter_excel_by_column(file_info_tuple, choice, animal_choice, experiment, o
             else:
                 last_index = len(df_raw_clean) - 1
 
-            # (v2) End = FIRST frame the nose reaches its exit position. After the nose leaves the frame the tracker
-            #      can keep inventing nose positions, which the "last change" rule above counts as movement.
+            # (v2) End = FIRST frame the nose reaches its exit position OR stops being tracked (its X and Y freeze),
+            #      whichever comes first. After the nose leaves the frame the tracker can keep inventing nose
+            #      positions, which the "last change" rule above counts as movement.
             if nose_col in df_raw_clean.columns:
-                at_exit = df_raw_clean.index[(df_raw_clean[nose_col] - final_static_val).abs() <= NOSE_EXIT_TOL]
-                at_exit = at_exit[at_exit >= start_index]
-                if not at_exit.empty and at_exit[0] < last_index:
-                    t_exit, t_last = df_raw_clean.loc[at_exit[0], 'Time'], df_raw_clean.loc[last_index, 'Time']
+                nose_x = df_raw_clean[nose_col]
+                nose_y = df_raw_clean['/Feature/Head/Nose_Y'] if '/Feature/Head/Nose_Y' in df_raw_clean.columns else nose_x
+                at_exit = df_raw_clean.index[((nose_x - final_static_val).abs() <= NOSE_EXIT_TOL)
+                                             & (df_raw_clean.index >= start_index)]
+                same = (nose_x.diff().abs() <= 1e-12) & (nose_y.diff().abs() <= 1e-12)
+                hold_len = same.groupby((~same).cumsum()).transform('sum')   # repeats following each real frame
+                hold_start = df_raw_clean.index[~same & (hold_len >= NOSE_HOLD_FRAMES)
+                                                & ((nose_x - final_static_val).abs() <= NOSE_EXIT_ZONE)
+                                                & (df_raw_clean.index >= start_index)]
+                candidates = [idx[0] for idx in (at_exit, hold_start) if not idx.empty]
+                exit_index = min(candidates) if candidates else None
+                if exit_index is not None and exit_index < last_index:
+                    t_exit, t_last = df_raw_clean.loc[exit_index, 'Time'], df_raw_clean.loc[last_index, 'Time']
                     if t_last - t_exit > 0.05:
                         captured_warnings.append(
-                            f"Nose reached its exit position at {t_exit:.2f}s but kept 'moving' until {t_last:.2f}s "
-                            f"(tracking after the nose left): window ends at {t_exit:.2f}s.")
-                    last_index = at_exit[0]
+                            f"Nose left the frame or stopped being tracked at {t_exit:.2f}s but kept 'moving' until "
+                            f"{t_last:.2f}s (tracking after the nose left): window ends at {t_exit:.2f}s.")
+                    last_index = exit_index
 
             # 3. Kinematics rebuilt from positions (v2), then cut to the movement window
             for col in df_kin_clean.columns:
@@ -408,6 +422,12 @@ def filter_excel_by_column(file_info_tuple, choice, animal_choice, experiment, o
                 parts += [f"{m} jump in {int(j.sum())} frames, first at {df_raw_clean.loc[j.idxmax(), 'Time']:.2f}s"
                           for m, j in sorted(jumps_win.items())]
                 captured_warnings.append("Implausible positions removed from measurements: " + "; ".join(parts))
+            bad_main = implausible.iloc[start_index : last_index + 1]
+            if len(bad_main) and bad_main.mean() > MAX_BAD_FRACTION:
+                captured_warnings.append(
+                    f"CHECK THIS VIDEO: {100 * bad_main.mean():.0f}% of the window failed the body checks. The nose is "
+                    f"probably mis-tracked in this session; it also sets the end of the window, so Time Duration and "
+                    f"the measurements are not reliable.")
 
             # 4. Heights relative to the floor (v2: columns picked by NAME, not position)
             info = []
