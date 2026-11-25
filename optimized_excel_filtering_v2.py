@@ -57,6 +57,11 @@ SWING_SPEED_DEFAULT = 0.1    # m/s; paw speed above this = swing. 0 keeps every 
 # beamwalk has one broad peak (~0.06-0.1, slow gripping/sliding), no valley -> 0.03 only removes jitter.
 # swimming not measured -> SWING_SPEED_DEFAULT.
 SWING_SPEED_BY_EXPERIMENT = {"groundwalk": 0.1, "gridwalk": 0.1, "beamwalk": 0.03}
+# Per species ("0" = Mus, "1" = Acomys). Acomys values are PROVISIONAL (same as Mus): resting Acomys paws jitter
+# more (~0.05 m/s vs ~0.02) and swing is faster (0.5-1.3 m/s), so 0.15-0.2 may suit them better once more
+# Acomys sessions have been tested (only 9 groundwalk sessions so far).
+SWING_SPEED_BY_SPECIES = {"0": SWING_SPEED_BY_EXPERIMENT,
+                          "1": {"groundwalk": 0.1, "gridwalk": 0.1, "beamwalk": 0.03}}
 FLOOR_PCT = 10               # floor = 10th percentile of left hind toe Y (90th in the upside-down right view)
 FROZEN_MIN_REPEATS = 1      # a marker whose X and Y repeat EXACTLY for this many frames is a tracker placeholder
                              # (real smoothed positions always change a little, even on a resting paw)
@@ -66,6 +71,10 @@ NOSE_HOLD_FRAMES = 5         # ...or at the first frame the nose freezes for thi
 NOSE_EXIT_ZONE = 0.02        # m; ...but only a freeze this close to the exit counts (mid-walk freezes, e.g. the nose
                              # hidden by the beam, are placeholders, not the end of the trial)
 MAX_JUMP_M = 0.03            # m per frame (3 m/s at 100 fps); a measured marker moving more than this = tracking jump
+MAX_JUMP_BY_SPECIES = {"0": 0.03,   # Mus: real paw moves <= ~25 mm/frame; fake jumps from ~25-40 mm
+                       "1": 0.04}   # Acomys: faster, real smooth swings reach ~31 mm/frame
+START_MOVE_TOL = 0.005       # m; the start marker must move this far from its first value to count as appearing
+                             # (a parked placeholder can drift by ~1 mm before the animal enters, e.g. Acomys clips)
 HIND_AHEAD_TOL = 0.01        # m; hind paw more than this ahead of the front paw on the same side = label swap
 BODY_LENGTH_RANGE = (0.7, 1.3)  # nose-tail base distance allowed, as a fraction of the session median
 MAX_BAD_FRACTION = 0.2       # more of the window than this failing the body checks = nose track broken: warn
@@ -228,12 +237,19 @@ def walking_direction(pos, last_index):
     return float(np.sign(mean_x.iloc[-1] - mean_x.iloc[0]))
 
 
-def mask_implausible(pos, last_index):
+def default_swing_speed(animal_choice, experiment):
+    """Default swing speed threshold (m/s) for a species ("0" Mus, "1" Acomys) and test."""
+    table = SWING_SPEED_BY_SPECIES.get(str(animal_choice), SWING_SPEED_BY_EXPERIMENT)
+    return table.get(experiment, SWING_SPEED_DEFAULT)
+
+
+def mask_implausible(pos, last_index, max_jump=MAX_JUMP_M):
     """(v2) Positions a walking mouse cannot produce -> NaN (run after mask_placeholders).
     1. Body checks in the ventral view -> the WHOLE frame (we cannot tell which marker is wrong):
        nose behind a hind paw; hind paw more than HIND_AHEAD_TOL ahead of the front paw on the same side;
        nose-tail base length outside BODY_LENGTH_RANGE x the session median.
-    2. Jump: a measured marker moving more than MAX_JUMP_M in one frame -> that marker, that frame.
+    2. Jump: a measured marker moving more than max_jump (per species, MAX_JUMP_BY_SPECIES) in one frame
+       -> that marker, that frame.
     3. Spike: a measured marker that leaves the midpoint of its neighbouring frames by more than SPIKE_MAX_M and
        comes straight back (tracking jitter, frequent on the beam) -> that marker, that frame. Tail markers are
        excluded because the tail can genuinely whip that fast.
@@ -263,7 +279,7 @@ def mask_implausible(pos, last_index):
         x, y = _xy(pos, m)
         if x is None:
             continue
-        jump = (np.hypot(x.diff(), y.diff()) > MAX_JUMP_M) & ~bad
+        jump = (np.hypot(x.diff(), y.diff()) > max_jump) & ~bad
         if jump.any():
             out.loc[jump, [_P + m + '_X', _P + m + '_Y']] = np.nan
             jumps[m] = jump
@@ -347,11 +363,11 @@ def filter_excel_by_column(file_info_tuple, choice, animal_choice, experiment, o
 
             if isinstance(column_targets, list):
                 first_vals = df_raw_clean[column_targets].iloc[0]
-                change_mask = ((df_raw_clean[column_targets] - first_vals).abs() > threshold).any(axis=1)
+                change_mask = ((df_raw_clean[column_targets] - first_vals).abs() > START_MOVE_TOL).any(axis=1)
                 movement_indices = df_raw_clean.index[change_mask]
             else:
                 first_val = df_raw_clean[column_targets].iloc[0]
-                movement_indices = df_raw_clean.index[(df_raw_clean[column_targets] - first_val).abs() > threshold]
+                movement_indices = df_raw_clean.index[(df_raw_clean[column_targets] - first_val).abs() > START_MOVE_TOL]
             
             start_index = movement_indices[0] if not movement_indices.empty else 0
 
@@ -406,7 +422,8 @@ def filter_excel_by_column(file_info_tuple, choice, animal_choice, experiment, o
             # (v2) Placeholder positions -> NaN for every measurement, floor and QC. Start/end and height cutoff
             #      detection keep the raw values (the start rule relies on the tail tip's placeholder).
             pos_holds, held = mask_placeholders(df_raw_clean)
-            pos_real, implausible, jumps, spikes = mask_implausible(pos_holds, last_index)
+            pos_real, implausible, jumps, spikes = mask_implausible(
+                pos_holds, last_index, MAX_JUMP_BY_SPECIES.get(str(animal_choice), MAX_JUMP_M))
             raw_win_real = pos_real.iloc[start_index : last_index + 1]
             df_kin_full, kept = kinematics_from_positions(pos_real, df_kin_clean)
             if kept:
@@ -416,9 +433,9 @@ def filter_excel_by_column(file_info_tuple, choice, animal_choice, experiment, o
             # Height cutoff time: heights are only kept before the hind paw reaches this X
             hind_timestamp = None
             if height_cutoff == "yes":
-                hind_paw_col = '/Feature/Paw/Tao/Hind/Left_X'
+                hind_paw_col = '/Feature/Paw/Tao/Hind/Right_X'
                 if hind_paw_col in df_raw_clean.columns and 'Time' in df_raw_clean.columns:
-                    threshold_val = 0 if old_or_new == "new" else -0.016
+                    threshold_val = -0.020
                     hind_reach = df_raw_clean[df_raw_clean[hind_paw_col] >= threshold_val]
                     if not hind_reach.empty:
                         hind_timestamp = df_raw_clean.loc[hind_reach.index[0], "Time"]
@@ -433,7 +450,7 @@ def filter_excel_by_column(file_info_tuple, choice, animal_choice, experiment, o
                 paws = CHOICE_MAP["3"]
                 paw_start = 0
                 if all(p in df_raw_clean.columns for p in paws):
-                    moved = ((df_raw_clean[paws] - df_raw_clean[paws].iloc[0]).abs() > threshold).any(axis=1)
+                    moved = ((df_raw_clean[paws] - df_raw_clean[paws].iloc[0]).abs() > START_MOVE_TOL).any(axis=1)
                     paw_start = df_raw_clean.index[moved][0] if moved.any() else 0
                 if paw_start < start_index:
                     height_start = paw_start
@@ -628,6 +645,20 @@ def filter_excel_by_column(file_info_tuple, choice, animal_choice, experiment, o
         return (False, file_name, error_msg, [], False)
 
 
+def unique_log_path(input_folder, output_folder):
+    """Log file named after the input folder and the start time, e.g.
+    error_log_Beam_2026-11-25_14-03-12.txt, so batches written to the same output folder never overwrite
+    each other's logs. A number is added if a log with that name already exists."""
+    name = os.path.basename(os.path.normpath(os.path.abspath(input_folder))) or 'input'
+    name = re.sub(r'[^A-Za-z0-9._-]+', '_', name).strip('_') or 'input'
+    stamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+    base = os.path.join(output_folder, f"error_log_{name}_{stamp}")
+    path, n = base + '.txt', 2
+    while os.path.exists(path):
+        path, n = f"{base}_{n}.txt", n + 1
+    return path
+
+
 # --- MAIN EXECUTION ---
 def main():
     # Streamlined Folder Validation
@@ -660,7 +691,7 @@ def main():
     height_cutoff = get_valid_input("Apply hind paw height cutoff? (yes/no): ", ["yes", "no"], "Choose 'yes' or 'no'.")
     floor_mode = get_valid_input("Floor reference - auto (measured per session) or fixed (old/new constants)? ",
                                  ["auto", "fixed"], "Choose 'auto' or 'fixed'.")
-    default_swing = SWING_SPEED_BY_EXPERIMENT.get(experiment, SWING_SPEED_DEFAULT)
+    default_swing = default_swing_speed(animal_choice, experiment)
     while True:
         sw = input(f"Paw swing speed threshold in m/s (Enter = {default_swing} for {experiment}, 0 = keep stance frames): ").strip()
         try:
@@ -687,7 +718,7 @@ def main():
     num_processes = max(1, num_processes)
     
     # --- LOG FILE SETUP ---
-    log_file_path = os.path.join(folder_output, "error_log.txt")
+    log_file_path = unique_log_path(folder_input, folder_output)
     print(f"\n[INFO] Checking {total_files} files using {num_processes} processes... Logging to: {log_file_path}")
     
     start_time = time.perf_counter()
@@ -695,6 +726,8 @@ def main():
 
     with open(log_file_path, 'w', encoding='utf-8') as log_file:
         log_file.write(f"--- Processing Started at {datetime.datetime.now()} ---\n")
+        log_file.write(f"Input folder:  {os.path.abspath(folder_input)}\n")
+        log_file.write(f"Output folder: {os.path.abspath(folder_output)}\n")
         log_file.write(f"Parameters: Choice={choice}, Animal={animal_choice}, Exp={experiment}, Set={old_or_new}, Floor={floor_mode}, Swing={swing_speed} m/s\n")
         log_file.write("-" * 50 + "\n")
 
